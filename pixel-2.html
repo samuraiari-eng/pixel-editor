@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Pixel Editor 完全安定版</title>
+
+<style>
+body{
+  margin:0;
+  font-family:sans-serif;
+  background:#f5f5f5;
+  text-align:center;
+}
+
+.toolbar{
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:center;
+  gap:6px;
+  padding:8px;
+}
+
+button{
+  padding:6px 10px;
+  font-size:14px;
+}
+
+canvas{
+  border:1px solid #555;
+  image-rendering:pixelated;
+  touch-action:none;
+  background:#fff;
+}
+
+#paletteStats{
+  font-size:12px;
+  padding:6px;
+}
+</style>
+</head>
+
+<body>
+
+<div class="toolbar">
+  <button onclick="setSize(20)">20×20</button>
+  <button onclick="setSize(32)">32×32</button>
+  <button onclick="setSize(64)">64×64</button>
+
+  <input type="color" id="colorPicker" value="#ff0000">
+
+  <button onclick="tool='pen'">✏</button>
+  <button onclick="tool='eyedropper'">💉</button>
+  <button onclick="tool='eraser'">🩹</button>
+  <button onclick="tool='fill'">🪣</button>
+  <button onclick="clearGrid()">全消し</button>
+
+  <button onclick="undo()">↶</button>
+  <button onclick="redo()">↷</button>
+
+  <input type="file" accept="image/*" onchange="loadImage(event)">
+  <button onclick="quantizeAndGrid(16)">減色→変換</button>
+</div>
+
+<canvas id="canvas"></canvas>
+<div id="paletteStats"></div>
+
+<script>
+
+let canvas=document.getElementById("canvas");
+let ctx=canvas.getContext("2d");
+
+let gridSize=32;
+let cellSize=12;
+let grid=[];
+let tool="pen";
+let currentColor="#ff0000";
+
+let isDrawing=false;
+
+let undoStack=[];
+let redoStack=[];
+
+let referenceImage=null;
+let overlayAlpha=0.4;
+
+/* =========================
+   初期化
+========================= */
+
+function initGrid(){
+  grid=[];
+  for(let y=0;y<gridSize;y++){
+    let row=[];
+    for(let x=0;x<gridSize;x++){
+      row.push(null);
+    }
+    grid.push(row);
+  }
+}
+
+function setSize(size){
+  gridSize=size;
+  canvas.width=gridSize*cellSize;
+  canvas.height=gridSize*cellSize;
+  initGrid();
+  draw();
+}
+
+/* =========================
+   描画
+========================= */
+
+function draw(){
+
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // 参照画像オーバーレイ
+  if(referenceImage){
+    ctx.globalAlpha=overlayAlpha;
+    ctx.drawImage(referenceImage,0,0,canvas.width,canvas.height);
+    ctx.globalAlpha=1;
+  }
+
+  // グリッド描画
+  for(let y=0;y<gridSize;y++){
+    for(let x=0;x<gridSize;x++){
+      if(grid[y][x]){
+        ctx.fillStyle=grid[y][x];
+        ctx.fillRect(x*cellSize,y*cellSize,cellSize,cellSize);
+      }
+    }
+  }
+
+  // グリッド線
+  ctx.strokeStyle="#ccc";
+  for(let i=0;i<=gridSize;i++){
+    ctx.beginPath();
+    ctx.moveTo(i*cellSize,0);
+    ctx.lineTo(i*cellSize,canvas.height);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(0,i*cellSize);
+    ctx.lineTo(canvas.width,i*cellSize);
+    ctx.stroke();
+  }
+
+  updatePaletteStats();
+}
+
+/* =========================
+   描画処理
+========================= */
+
+function paint(x,y){
+
+  if(x<0||y<0||x>=gridSize||y>=gridSize)return;
+
+  if(tool==="pen"){
+    grid[y][x]=currentColor;
+  }
+
+  if(tool==="eraser"){
+    grid[y][x]=null;
+  }
+
+  if(tool==="eyedropper"){
+
+    if(grid[y][x]){
+      currentColor=grid[y][x];
+      document.getElementById("colorPicker").value=currentColor;
+    }
+    else if(referenceImage){
+      let temp=document.createElement("canvas");
+      temp.width=canvas.width;
+      temp.height=canvas.height;
+      let tctx=temp.getContext("2d");
+      tctx.drawImage(referenceImage,0,0,canvas.width,canvas.height);
+      let pixel=tctx.getImageData(x*cellSize,y*cellSize,1,1).data;
+
+      currentColor=rgbToHex(pixel[0],pixel[1],pixel[2]);
+      document.getElementById("colorPicker").value=currentColor;
+    }
+  }
+
+  if(tool==="fill"){
+
+    let targetColor = grid[y][x];
+    if(!targetColor) return;
+
+    let replacementColor = currentColor;
+
+    if(targetColor === replacementColor) return;
+
+    floodFillTolerance(x,y,targetColor,replacementColor,30);
+    return; // ← 重要（draw二重防止）
+  }
+
+  draw();
+}
+
+/* =========================
+   マウス & タッチ
+========================= */
+
+canvas.addEventListener("mousedown",e=>{
+  saveState();
+  isDrawing=true;
+  handleEvent(e);
+});
+
+canvas.addEventListener("mousemove",e=>{
+  if(isDrawing) handleEvent(e);
+});
+
+canvas.addEventListener("mouseup",()=>isDrawing=false);
+
+canvas.addEventListener("touchstart",e=>{
+  saveState();
+  isDrawing=true;
+  handleTouch(e);
+});
+
+canvas.addEventListener("touchmove",e=>{
+  if(isDrawing) handleTouch(e);
+});
+
+canvas.addEventListener("touchend",()=>isDrawing=false);
+
+function handleEvent(e){
+  const rect=canvas.getBoundingClientRect();
+  const x=Math.floor((e.clientX-rect.left)/cellSize);
+  const y=Math.floor((e.clientY-rect.top)/cellSize);
+  paint(x,y);
+}
+
+function handleTouch(e){
+  e.preventDefault();
+  const rect=canvas.getBoundingClientRect();
+  const touch=e.touches[0];
+  const x=Math.floor((touch.clientX-rect.left)/cellSize);
+  const y=Math.floor((touch.clientY-rect.top)/cellSize);
+  paint(x,y);
+}
+
+/* =========================
+   Undo / Redo
+========================= */
+
+function saveState(){
+  undoStack.push(JSON.stringify(grid));
+  redoStack=[];
+}
+
+function undo(){
+  if(!undoStack.length)return;
+  redoStack.push(JSON.stringify(grid));
+  grid=JSON.parse(undoStack.pop());
+  draw();
+}
+
+function redo(){
+  if(!redoStack.length)return;
+  undoStack.push(JSON.stringify(grid));
+  grid=JSON.parse(redoStack.pop());
+  draw();
+}
+
+document.addEventListener("keydown",function(e){
+  if((e.ctrlKey||e.metaKey)&&e.key==="z"){
+    e.preventDefault();
+    undo();
+  }
+  if((e.ctrlKey||e.metaKey)&&e.key==="y"){
+    e.preventDefault();
+    redo();
+  }
+});
+
+/* =========================
+   画像読み込み
+========================= */
+
+function loadImage(e){
+  let reader=new FileReader();
+  reader.onload=function(event){
+    referenceImage=new Image();
+    referenceImage.onload=function(){
+      draw();
+    }
+    referenceImage.src=event.target.result;
+  }
+  reader.readAsDataURL(e.target.files[0]);
+}
+
+/* =========================
+   減色→グリッド
+========================= */
+
+function quantizeAndGrid(colorCount=16){
+
+  if(!referenceImage)return;
+
+  saveState();
+
+  let temp=document.createElement("canvas");
+  temp.width=gridSize;
+  temp.height=gridSize;
+  let tctx=temp.getContext("2d");
+
+  tctx.drawImage(referenceImage,0,0,gridSize,gridSize);
+
+  let img=tctx.getImageData(0,0,gridSize,gridSize);
+  let data=img.data;
+
+  let step=Math.floor(256/Math.cbrt(colorCount));
+
+  for(let i=0;i<data.length;i+=4){
+    data[i]=Math.floor(data[i]/step)*step;
+    data[i+1]=Math.floor(data[i+1]/step)*step;
+    data[i+2]=Math.floor(data[i+2]/step)*step;
+  }
+
+  for(let y=0;y<gridSize;y++){
+    for(let x=0;x<gridSize;x++){
+      let i=(y*gridSize+x)*4;
+      grid[y][x]=rgbToHex(data[i],data[i+1],data[i+2]);
+    }
+  }
+
+  draw();
+}
+
+/* =========================
+   使用色集計
+========================= */
+
+function updatePaletteStats(){
+
+  let counts={};
+
+  for(let y=0;y<gridSize;y++){
+    for(let x=0;x<gridSize;x++){
+      let c=grid[y][x];
+      if(c){
+        counts[c]=(counts[c]||0)+1;
+      }
+    }
+  }
+
+  let html="使用色数: "+Object.keys(counts).length+"<br>";
+
+  for(let c in counts){
+    html+=`
+      <span 
+        onclick="selectPaletteColor('${c}')"
+        style="
+          display:inline-block;
+          width:18px;
+          height:18px;
+          background:${c};
+          border:2px solid #000;
+          margin:3px;
+          cursor:pointer;
+        ">
+      </span>
+      ${counts[c]}
+    `;
+  }
+
+  document.getElementById("paletteStats").innerHTML=html;
+}
+/* =========================
+   RGB→HEX
+========================= */
+
+function rgbToHex(r,g,b){
+  return "#"+
+  ((1<<24)+(r<<16)+(g<<8)+b)
+  .toString(16).slice(1);
+}
+
+/* ========================= */
+
+document.getElementById("colorPicker").addEventListener("input",e=>{
+  currentColor=e.target.value;
+});
+
+setSize(32);
+/* =========================
+   全消し
+========================= */
+
+function clearGrid(){
+
+  if(!confirm("すべて消しますか？")) return;
+
+  saveState(); // Undo対応
+
+  for(let y=0;y<gridSize;y++){
+    for(let x=0;x<gridSize;x++){
+      grid[y][x]=null;
+    }
+  }
+
+  draw();
+}
+function floodFillTolerance(x,y,targetColor,replacementColor,tolerance){
+
+  saveState();
+
+  let stack=[[x,y]];
+  let targetRGB = hexToRgb(targetColor);
+
+  while(stack.length){
+
+    let [cx,cy]=stack.pop();
+
+    if(cx<0||cy<0||cx>=gridSize||cy>=gridSize) continue;
+
+    let current = grid[cy][cx];
+    if(!current) continue;
+
+    let currentRGB = hexToRgb(current);
+
+    let diff = colorDiff(targetRGB,currentRGB);
+
+    if(diff > tolerance) continue;
+
+    grid[cy][cx]=replacementColor;
+
+    stack.push([cx+1,cy]);
+    stack.push([cx-1,cy]);
+    stack.push([cx,cy+1]);
+    stack.push([cx,cy-1]);
+  }
+
+  draw();
+}
+  function hexToRgb(hex){
+    let r = parseInt(hex.substr(1,2),16);
+    let g = parseInt(hex.substr(3,2),16);
+    let b = parseInt(hex.substr(5,2),16);
+    return {r,g,b};
+  }
+  function colorDiff(c1,c2){
+    return Math.sqrt(
+      (c1.r-c2.r)**2 +
+      (c1.g-c2.g)**2 +
+      (c1.b-c2.b)**2
+    );
+  }
+function selectPaletteColor(color){
+  currentColor=color;
+  document.getElementById("colorPicker").value=color;
+}
+
+</script>
+</body>
+</html>
