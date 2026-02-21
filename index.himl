@@ -66,6 +66,7 @@ canvas{
 <div id="paletteStats"></div>
 
 <script>
+alert("JS start");
 
 let canvas=document.getElementById("canvas");
 let ctx=canvas.getContext("2d");
@@ -459,3 +460,4 @@ function selectPaletteColor(color){
 </script>
 </body>
 </html>
+
